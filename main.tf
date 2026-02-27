@@ -247,21 +247,26 @@ resource "terraform_data" "oracle_users" {
       done
       echo "Oracle XEPDB1 is ready."
 
-      echo "Creating Oracle users..."
-      docker exec oracle-xe-test bash -c "printf '%s\n' \
-        'alter session set container=XEPDB1;' \
-        'CREATE USER vault IDENTIFIED BY vaultpasswd;' \
-        'ALTER USER vault DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;' \
-        'GRANT CREATE SESSION, RESOURCE, UNLIMITED TABLESPACE, DBA TO vault;' \
-        'CREATE USER staticvault IDENTIFIED BY test;' \
-        'ALTER USER staticvault DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;' \
-        'GRANT CREATE SESSION, RESOURCE, UNLIMITED TABLESPACE, DBA TO staticvault;' \
-        'exit;' \
-        | sqlplus sys/rootpassword as sysdba"
+      echo "Creating SQL script..."
+      cat > /tmp/create_vault_users.sql << 'SQLEOF'
+alter session set container=XEPDB1;
+CREATE USER vault IDENTIFIED BY vaultpasswd;
+ALTER USER vault DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;
+GRANT CREATE SESSION, RESOURCE, UNLIMITED TABLESPACE, DBA TO vault;
+CREATE USER staticvault IDENTIFIED BY test;
+ALTER USER staticvault DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;
+GRANT CREATE SESSION, RESOURCE, UNLIMITED TABLESPACE, DBA TO staticvault;
+exit;
+SQLEOF
+
+      echo "Copying SQL script into container..."
+      docker cp /tmp/create_vault_users.sql oracle-xe-test:/tmp/create_vault_users.sql
+
+      echo "Executing SQL script..."
+      docker exec oracle-xe-test bash -c "sqlplus sys/rootpassword as sysdba @/tmp/create_vault_users.sql"
 
       echo "Verifying users were created..."
-      RESULT=$(docker exec oracle-xe-test bash -c \
-        "echo 'alter session set container=XEPDB1; SELECT username FROM all_users WHERE username = '\''VAULT'\''; exit;' | sqlplus -s sys/rootpassword as sysdba")
+      RESULT=$(docker exec oracle-xe-test bash -c "echo -e 'alter session set container=XEPDB1;\nSELECT username FROM all_users WHERE username = '\''VAULT'\'';\nexit;' | sqlplus -s sys/rootpassword as sysdba")
       if echo "$RESULT" | grep -q "VAULT"; then
         echo "Oracle users created successfully."
       else
