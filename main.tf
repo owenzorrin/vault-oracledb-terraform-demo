@@ -239,30 +239,34 @@ resource "terraform_data" "oracle_users" {
 
   provisioner "local-exec" {
     command = <<-EOT
-      echo "Waiting for Oracle XEPDB1 to be ready..."
-      until docker exec oracle-xe-test bash -c "echo -e 'alter session set container=XEPDB1;\nSELECT 1 AS ready FROM DUAL;\nexit;' | sqlplus -s sys/rootpassword as sysdba" 2>/dev/null | grep -q "ready"; do
-        echo "  Oracle XEPDB1 not ready yet, retrying in 15s..."
+      echo "Waiting for Oracle to be fully ready..."
+      echo "This may take 2-5 minutes for the first startup..."
+      until docker logs oracle-xe-test 2>&1 | grep -q "DATABASE IS READY TO USE"; do
+        echo "  Oracle not fully ready yet, retrying in 15s..."
         sleep 15
       done
-      echo "Oracle XEPDB1 is ready. Waiting 10s for PDB to fully stabilize..."
-      sleep 10
+      echo "Oracle is ready."
 
       echo "Copying SQL scripts into container..."
       docker cp ${path.module}/scripts/create_users.sql oracle-xe-test:/tmp/create_users.sql
       docker cp ${path.module}/scripts/verify_users.sql oracle-xe-test:/tmp/verify_users.sql
 
-      echo "Creating Oracle users..."
-      docker exec oracle-xe-test bash -c "sqlplus sys/rootpassword as sysdba @/tmp/create_users.sql"
+      echo "Creating Oracle users (with retries)..."
+      for i in 1 2 3 4 5; do
+        docker exec oracle-xe-test bash -c "sqlplus sys/rootpassword as sysdba @/tmp/create_users.sql"
 
-      echo "Verifying users were created..."
-      RESULT=$(docker exec oracle-xe-test bash -c "sqlplus -s sys/rootpassword as sysdba @/tmp/verify_users.sql")
-      if echo "$RESULT" | grep -q "VAULT"; then
-        echo "Oracle users created successfully."
-      else
-        echo "ERROR: Oracle users were NOT created. Output:"
-        echo "$RESULT"
-        exit 1
-      fi
+        RESULT=$(docker exec oracle-xe-test bash -c "sqlplus -s sys/rootpassword as sysdba @/tmp/verify_users.sql")
+        if echo "$RESULT" | grep -q "VAULT"; then
+          echo "Oracle users created successfully on attempt $i."
+          exit 0
+        fi
+
+        echo "  Attempt $i failed, retrying in 15s..."
+        sleep 15
+      done
+
+      echo "ERROR: Failed to create Oracle users after 5 attempts."
+      exit 1
     EOT
   }
 }
