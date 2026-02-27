@@ -1,0 +1,5 @@
+# Copy this file to terraform.tfvars and fill in your values
+vault_license     = "your-vault-enterprise-license-here"
+oracle_password   = "rootpassword"
+vault_db_username = "vault"
+vault_db_password = "vaultpasswd"
