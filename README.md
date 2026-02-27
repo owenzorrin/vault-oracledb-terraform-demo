@@ -6,6 +6,7 @@ Quick setup for testing the Oracle database plugin for Vault on an M series Mac 
 
 - M series Mac with Docker installed
 - [Colima](https://github.com/abiosoft/colima#installation) installed (`brew install colima`)
+- Colima dependencies: `brew install lima-additional-guestagents qemu`
 - Terraform installed (`brew install terraform`)
 - `jq` installed (`brew install jq`)
 - Vault CLI installed (`brew install vault`)

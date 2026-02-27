@@ -239,12 +239,13 @@ resource "terraform_data" "oracle_users" {
 
   provisioner "local-exec" {
     command = <<-EOT
-      echo "Waiting for Oracle to be ready..."
+      echo "Waiting for Oracle XEPDB1 to be ready..."
       until docker exec oracle-xe-test sh -c \
-        "echo 'SELECT 1 FROM DUAL;' | sqlplus -s sys/${var.oracle_password} as sysdba" 2>/dev/null | grep -q "1"; do
-        echo "  Oracle not ready yet, retrying in 10s..."
-        sleep 10
+        "echo 'alter session set container=XEPDB1; SELECT 1 FROM DUAL; exit;' | sqlplus -s sys/${var.oracle_password} as sysdba" 2>/dev/null | grep -q "1"; do
+        echo "  Oracle XEPDB1 not ready yet, retrying in 15s..."
+        sleep 15
       done
+      echo "Oracle XEPDB1 is ready."
 
       echo "Creating Vault database user..."
       docker exec oracle-xe-test sh -c "echo \"
