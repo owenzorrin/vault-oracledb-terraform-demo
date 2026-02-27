@@ -19,6 +19,9 @@ Quick setup for testing the Oracle database plugin for Vault on an M series Mac 
 ├── main.tf                  # Terraform configuration
 ├── config/
 │   └── config.hcl           # Vault server configuration
+├── scripts/
+│   ├── create_users.sql     # Oracle user creation SQL
+│   └── verify_users.sql     # Oracle user verification SQL
 ├── client/                  # Oracle Instant Client (downloaded by Terraform)
 ├── plugin/                  # Vault Oracle plugin binary (downloaded by Terraform)
 ├── data/                    # Vault Raft storage + init.json (host-mounted volume)
@@ -98,24 +101,38 @@ vault read database/static-creds/static-role
 
 ## Teardown
 
+The Vault provider requires a running Vault to destroy its resources. Since we're tearing everything down, remove those resources from state first, then destroy the rest:
+
 ```bash
-terraform destroy
+terraform state rm vault_mount.database
+terraform state rm vault_generic_endpoint.oracle_connection
+terraform state rm vault_database_secret_backend_role.dynamic_role
+terraform state rm vault_database_secret_backend_static_role.static_role
+terraform destroy -auto-approve
 docker rm -f vault-test oracle-xe-test
 colima stop
 ```
 
 ## Starting Fresh
 
-If you need to reset everything and start over:
-
 ```bash
-docker rm -f vault-test oracle-xe-test
-rm -rf data/*
+terraform state rm vault_mount.database 2>/dev/null
+terraform state rm vault_generic_endpoint.oracle_connection 2>/dev/null
+terraform state rm vault_database_secret_backend_role.dynamic_role 2>/dev/null
+terraform state rm vault_database_secret_backend_static_role.static_role 2>/dev/null
 terraform destroy -auto-approve
+docker rm -f vault-test oracle-xe-test
+rm -rf data/raft data/vault.db
 echo "placeholder" > .vault-token
-```
 
-Then re-run from Stage 1.
+# Stage 1
+terraform apply \
+  -target=terraform_data.vault_init \
+  -target=terraform_data.oracle_users
+
+# Stage 2
+terraform apply
+```
 
 ## Notes
 

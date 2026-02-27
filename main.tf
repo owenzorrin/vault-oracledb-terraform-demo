@@ -240,33 +240,22 @@ resource "terraform_data" "oracle_users" {
   provisioner "local-exec" {
     command = <<-EOT
       echo "Waiting for Oracle XEPDB1 to be ready..."
-      until docker exec oracle-xe-test bash -c \
-        "echo 'alter session set container=XEPDB1; SELECT 1 FROM DUAL; exit;' | sqlplus -s sys/rootpassword as sysdba" 2>/dev/null | grep -q "1"; do
+      until docker exec oracle-xe-test bash -c "echo -e 'alter session set container=XEPDB1;\nSELECT 1 AS ready FROM DUAL;\nexit;' | sqlplus -s sys/rootpassword as sysdba" 2>/dev/null | grep -q "ready"; do
         echo "  Oracle XEPDB1 not ready yet, retrying in 15s..."
         sleep 15
       done
-      echo "Oracle XEPDB1 is ready."
+      echo "Oracle XEPDB1 is ready. Waiting 10s for PDB to fully stabilize..."
+      sleep 10
 
-      echo "Creating SQL script..."
-      cat > /tmp/create_vault_users.sql << 'SQLEOF'
-alter session set container=XEPDB1;
-CREATE USER vault IDENTIFIED BY vaultpasswd;
-ALTER USER vault DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;
-GRANT CREATE SESSION, RESOURCE, UNLIMITED TABLESPACE, DBA TO vault;
-CREATE USER staticvault IDENTIFIED BY test;
-ALTER USER staticvault DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;
-GRANT CREATE SESSION, RESOURCE, UNLIMITED TABLESPACE, DBA TO staticvault;
-exit;
-SQLEOF
+      echo "Copying SQL scripts into container..."
+      docker cp ${path.module}/scripts/create_users.sql oracle-xe-test:/tmp/create_users.sql
+      docker cp ${path.module}/scripts/verify_users.sql oracle-xe-test:/tmp/verify_users.sql
 
-      echo "Copying SQL script into container..."
-      docker cp /tmp/create_vault_users.sql oracle-xe-test:/tmp/create_vault_users.sql
-
-      echo "Executing SQL script..."
-      docker exec oracle-xe-test bash -c "sqlplus sys/rootpassword as sysdba @/tmp/create_vault_users.sql"
+      echo "Creating Oracle users..."
+      docker exec oracle-xe-test bash -c "sqlplus sys/rootpassword as sysdba @/tmp/create_users.sql"
 
       echo "Verifying users were created..."
-      RESULT=$(docker exec oracle-xe-test bash -c "echo -e 'alter session set container=XEPDB1;\nSELECT username FROM all_users WHERE username = '\''VAULT'\'';\nexit;' | sqlplus -s sys/rootpassword as sysdba")
+      RESULT=$(docker exec oracle-xe-test bash -c "sqlplus -s sys/rootpassword as sysdba @/tmp/verify_users.sql")
       if echo "$RESULT" | grep -q "VAULT"; then
         echo "Oracle users created successfully."
       else
