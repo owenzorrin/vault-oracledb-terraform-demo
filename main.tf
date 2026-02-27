@@ -240,32 +240,35 @@ resource "terraform_data" "oracle_users" {
   provisioner "local-exec" {
     command = <<-EOT
       echo "Waiting for Oracle XEPDB1 to be ready..."
-      until docker exec oracle-xe-test sh -c \
-        "echo 'alter session set container=XEPDB1; SELECT 1 FROM DUAL; exit;' | sqlplus -s sys/${var.oracle_password} as sysdba" 2>/dev/null | grep -q "1"; do
+      until docker exec oracle-xe-test bash -c \
+        "echo 'alter session set container=XEPDB1; SELECT 1 FROM DUAL; exit;' | sqlplus -s sys/rootpassword as sysdba" 2>/dev/null | grep -q "1"; do
         echo "  Oracle XEPDB1 not ready yet, retrying in 15s..."
         sleep 15
       done
       echo "Oracle XEPDB1 is ready."
 
-      echo "Creating Vault database user..."
-      docker exec oracle-xe-test sh -c "echo \"
-        alter session set container=XEPDB1;
-        CREATE USER ${var.vault_db_username} IDENTIFIED BY ${var.vault_db_password};
-        ALTER USER ${var.vault_db_username} DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;
-        GRANT CREATE SESSION, RESOURCE, UNLIMITED TABLESPACE, DBA TO ${var.vault_db_username};
-        exit;
-      \" | sqlplus sys/${var.oracle_password} as sysdba"
+      echo "Creating Oracle users..."
+      docker exec oracle-xe-test bash -c "printf '%s\n' \
+        'alter session set container=XEPDB1;' \
+        'CREATE USER vault IDENTIFIED BY vaultpasswd;' \
+        'ALTER USER vault DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;' \
+        'GRANT CREATE SESSION, RESOURCE, UNLIMITED TABLESPACE, DBA TO vault;' \
+        'CREATE USER staticvault IDENTIFIED BY test;' \
+        'ALTER USER staticvault DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;' \
+        'GRANT CREATE SESSION, RESOURCE, UNLIMITED TABLESPACE, DBA TO staticvault;' \
+        'exit;' \
+        | sqlplus sys/rootpassword as sysdba"
 
-      echo "Creating static role user..."
-      docker exec oracle-xe-test sh -c "echo \"
-        alter session set container=XEPDB1;
-        CREATE USER staticvault IDENTIFIED BY test;
-        ALTER USER staticvault DEFAULT TABLESPACE USERS QUOTA UNLIMITED ON USERS;
-        GRANT CREATE SESSION, RESOURCE, UNLIMITED TABLESPACE, DBA TO staticvault;
-        exit;
-      \" | sqlplus sys/${var.oracle_password} as sysdba"
-
-      echo "Oracle users created successfully."
+      echo "Verifying users were created..."
+      RESULT=$(docker exec oracle-xe-test bash -c \
+        "echo 'alter session set container=XEPDB1; SELECT username FROM all_users WHERE username = '\''VAULT'\''; exit;' | sqlplus -s sys/rootpassword as sysdba")
+      if echo "$RESULT" | grep -q "VAULT"; then
+        echo "Oracle users created successfully."
+      else
+        echo "ERROR: Oracle users were NOT created. Output:"
+        echo "$RESULT"
+        exit 1
+      fi
     EOT
   }
 }
