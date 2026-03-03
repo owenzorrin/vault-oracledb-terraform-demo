@@ -113,27 +113,6 @@ docker rm -f vault-test oracle-xe-test
 colima stop
 ```
 
-## Starting Fresh
-
-```bash
-terraform state rm vault_mount.database 2>/dev/null
-terraform state rm vault_generic_endpoint.oracle_connection 2>/dev/null
-terraform state rm vault_database_secret_backend_role.dynamic_role 2>/dev/null
-terraform state rm vault_database_secret_backend_static_role.static_role 2>/dev/null
-terraform destroy -auto-approve
-docker rm -f vault-test oracle-xe-test
-rm -rf data/raft data/vault.db
-echo "placeholder" > .vault-token
-
-# Stage 1
-terraform apply \
-  -target=terraform_data.vault_init \
-  -target=terraform_data.oracle_users
-
-# Stage 2
-terraform apply
-```
-
 ## Notes
 
 - **Two-stage apply**: Required because Vault must be initialized and unsealed before the Terraform Vault provider can configure it.
