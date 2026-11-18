@@ -12,6 +12,8 @@ Quick setup for testing the Oracle database plugin for Vault on an M series Mac 
 - Vault CLI installed (`brew install vault`)
 - Vault Enterprise license exported as `VAULT_LICENSE`
 
+> **AWS versions**: See [`aws/`](aws/README.md) for deploying on AWS using a Packer-built AMI (Oracle XE 21c + Vault Enterprise as native systemd services, no Docker), or [`aws-two-instance/`](aws-two-instance/README.md) for a Terraform-only layout with Vault and Oracle XE on separate EC2 instances.
+
 ## Project Structure
 
 ```
@@ -27,7 +29,9 @@ Quick setup for testing the Oracle database plugin for Vault on an M series Mac 
 ├── data/                    # Vault Raft storage + init.json (host-mounted volume)
 ├── .vault-token             # Root token (generated during init, gitignored)
 ├── .vault-unseal-key        # Unseal key (generated during init, gitignored)
-└── .gitignore
+├── .gitignore
+├── aws/                     # AWS version — Packer + Terraform (see aws/README.md)
+└── aws-two-instance/        # AWS version — Terraform only, Vault and Oracle on separate EC2 instances
 ```
 
 ## Setup

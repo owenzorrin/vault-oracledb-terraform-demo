@@ -1,0 +1,18 @@
+# Terraform state and credentials
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+terraform.tfvars
+.vault-token
+.vault-unseal-key
+
+# Generated Vault config (rendered from .tpl at apply time)
+config/config.hcl
+
+# Downloaded artifacts
+client/
+plugin/
+
+# Packer build output
+packer/manifest.json

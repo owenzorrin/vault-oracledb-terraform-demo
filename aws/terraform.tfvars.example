@@ -1,0 +1,17 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# Never commit terraform.tfvars — it is gitignored.
+
+aws_region           = "us-east-1"
+instance_type        = "t3.medium"
+ami_id               = "ami-0xxxxxxxxxxxxxxxxx"   # output of: packer build packer/oracle-xe.pkr.hcl
+key_pair_name        = "your-ec2-key-pair-name"
+ssh_private_key_path = "~/.ssh/your-key.pem"
+allowed_cidr         = "0.0.0.0/0"               # restrict to your IP for security: "1.2.3.4/32"
+
+# vault_license is read from the TF_VAR_vault_license environment variable (README Step 1).
+# Only uncomment this line if you are NOT exporting TF_VAR_vault_license; a value here overrides the env var.
+# vault_license   = "your-vault-enterprise-license-here"
+
+oracle_password   = "rootpassword"
+vault_db_username = "vault"
+vault_db_password = "vaultpasswd"
