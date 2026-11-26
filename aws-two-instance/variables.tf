@@ -70,4 +70,9 @@ variable "vault_db_password" {
   type        = string
   default     = "vaultpasswd"
   sensitive   = true
+
+  validation {
+    condition     = length(regexall("\"", var.vault_db_password)) == 0
+    error_message = "vault_db_password must not contain a double quote (\")."
+  }
 }

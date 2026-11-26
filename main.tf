@@ -8,6 +8,10 @@ terraform {
       source  = "hashicorp/vault"
       version = "~> 4.0"
     }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.4"
+    }
   }
 }
 
@@ -39,6 +43,11 @@ variable "vault_db_password" {
   type        = string
   default     = "vaultpasswd"
   sensitive   = true
+
+  validation {
+    condition     = length(regexall("\"", var.vault_db_password)) == 0
+    error_message = "vault_db_password must not contain a double quote (\")."
+  }
 }
 
 # =============================================================================
@@ -234,8 +243,39 @@ resource "terraform_data" "vault_init" {
 # Stage 1: Oracle User Setup
 # =============================================================================
 
+# Rendered with the tfvars passwords. Written to a gitignored file instead of
+# being inlined so the provisioner output below is not suppressed as sensitive.
+# Keeps the rendered SQL out of Git even without the root .gitignore.
+resource "local_file" "generated_gitignore" {
+  filename = "${path.module}/.generated/.gitignore"
+  content  = "*\n"
+}
+
+resource "local_sensitive_file" "create_users_sql" {
+  filename        = "${path.module}/.generated/create_users.sql"
+  file_permission = "0600"
+  content = templatefile("${path.module}/scripts/create_users.sql.tpl", {
+    vault_db_username = var.vault_db_username
+    vault_db_password = var.vault_db_password
+  })
+}
+
+resource "local_file" "verify_users_sql" {
+  filename        = "${path.module}/.generated/verify_users.sql"
+  file_permission = "0600"
+  content = templatefile("${path.module}/scripts/verify_users.sql.tpl", {
+    vault_db_username = var.vault_db_username
+  })
+}
+
 resource "terraform_data" "oracle_users" {
   depends_on = [docker_container.oracle]
+
+  # Re-create the users when the rendered SQL (e.g. vault_db_password) changes.
+  triggers_replace = [
+    local_sensitive_file.create_users_sql.content_sha256,
+    local_file.verify_users_sql.content_sha256,
+  ]
 
   provisioner "local-exec" {
     command = <<-EOT
@@ -247,16 +287,12 @@ resource "terraform_data" "oracle_users" {
       done
       echo "Oracle is ready."
 
-      echo "Copying SQL scripts into container..."
-      docker cp ${path.module}/scripts/create_users.sql oracle-xe-test:/tmp/create_users.sql
-      docker cp ${path.module}/scripts/verify_users.sql oracle-xe-test:/tmp/verify_users.sql
-
+      # OS authentication (/ as sysdba) as the container's oracle user, so no
+      # SYS password is needed here.
       echo "Creating Oracle users (with retries)..."
       for i in 1 2 3 4 5; do
-        docker exec oracle-xe-test bash -c "sqlplus sys/rootpassword as sysdba @/tmp/create_users.sql"
-
-        RESULT=$(docker exec oracle-xe-test bash -c "sqlplus -s sys/rootpassword as sysdba @/tmp/verify_users.sql")
-        if echo "$RESULT" | grep -q "VAULT"; then
+        if docker exec -i oracle-xe-test sqlplus -s / as sysdba < ${local_sensitive_file.create_users_sql.filename} &&
+          docker exec -i oracle-xe-test sqlplus -s / as sysdba < ${local_file.verify_users_sql.filename} | grep -q "USER_OK:"; then
           echo "Oracle users created successfully on attempt $i."
           exit 0
         fi

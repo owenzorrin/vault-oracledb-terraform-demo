@@ -13,6 +13,16 @@ terraform {
   }
 }
 
+locals {
+  create_users_sql = templatefile("${path.module}/scripts/create_users.sql.tpl", {
+    vault_db_username = var.vault_db_username
+    vault_db_password = var.vault_db_password
+  })
+  verify_users_sql = templatefile("${path.module}/scripts/verify_users.sql.tpl", {
+    vault_db_username = var.vault_db_username
+  })
+}
+
 # =============================================================================
 # Providers
 # =============================================================================
@@ -383,6 +393,8 @@ resource "terraform_data" "bootstrap_oracle" {
 }
 
 resource "terraform_data" "upload_scripts" {
+  triggers_replace = [sha256(local.create_users_sql), sha256(local.verify_users_sql)]
+
   depends_on = [terraform_data.bootstrap_oracle]
 
   connection {
@@ -392,13 +404,27 @@ resource "terraform_data" "upload_scripts" {
     private_key = file(var.ssh_private_key_path)
   }
 
+  # Rendered with the tfvars passwords. The file provisioner uploads as 0644, so
+  # use a private directory; create_users.sql is removed after the users exist.
+  provisioner "remote-exec" {
+    inline = ["install -d -m 700 /home/ec2-user/.vault-demo-sql"]
+  }
+
   provisioner "file" {
-    source      = "${path.module}/scripts/"
-    destination = "/tmp/"
+    content     = local.create_users_sql
+    destination = "/home/ec2-user/.vault-demo-sql/create_users.sql"
+  }
+
+  provisioner "file" {
+    content     = local.verify_users_sql
+    destination = "/home/ec2-user/.vault-demo-sql/verify_users.sql"
   }
 }
 
 resource "terraform_data" "oracle_users" {
+  # Re-create the users when the rendered SQL (e.g. vault_db_password) changes.
+  triggers_replace = [terraform_data.upload_scripts.id]
+
   depends_on = [terraform_data.upload_scripts]
 
   connection {
@@ -416,7 +442,13 @@ resource "terraform_data" "oracle_users" {
       "export ORACLE_SID=XE",
       "for i in $(seq 1 20); do echo 'SELECT 1 FROM DUAL;' | sudo -u oracle ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$ORACLE_SID $ORACLE_HOME/bin/sqlplus -s / as sysdba 2>&1 | grep -qE '^[[:space:]]*1$' && break || { echo \"  Attempt $i: DB not ready, retrying in 15s...\"; sleep 15; }; done",
       "echo 'Creating Oracle users...'",
-      "OK=0; for i in 1 2 3 4 5; do sudo -u oracle bash -c \"export ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$ORACLE_SID; $ORACLE_HOME/bin/sqlplus sys/${var.oracle_password} as sysdba @/tmp/create_users.sql\" ; RESULT=$(sudo -u oracle bash -c \"export ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$ORACLE_SID; $ORACLE_HOME/bin/sqlplus -s sys/${var.oracle_password} as sysdba @/tmp/verify_users.sql\"); if echo \"$RESULT\" | grep -q 'VAULT'; then echo 'Oracle users created successfully.'; OK=1; break; fi; echo \"Attempt $i failed, retrying in 15s...\"; sleep 15; done; [ $OK -eq 1 ] || { echo 'ERROR: Oracle users were not created'; exit 1; }",
+      # OS authentication (/ as sysdba) as the oracle user: no SYS password on the
+      # command line, so this provisioner's output is not suppressed as sensitive.
+      "SQL_DIR=/home/ec2-user/.vault-demo-sql",
+      "SQLPLUS=\"sudo -u oracle ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$ORACLE_SID $ORACLE_HOME/bin/sqlplus -s / as sysdba\"",
+      "OK=0; for i in 1 2 3 4 5; do if $SQLPLUS < $SQL_DIR/create_users.sql && $SQLPLUS < $SQL_DIR/verify_users.sql | grep -q 'USER_OK:'; then echo 'Oracle users created successfully.'; OK=1; break; fi; echo \"Attempt $i failed, retrying in 15s...\"; sleep 15; done",
+      "[ $OK -eq 1 ] || { echo 'ERROR: Oracle users were not created'; exit 1; }",
+      "rm -f $SQL_DIR/create_users.sql",
       "echo 'Listener status:'",
       "sudo -u oracle bash -c \"export ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$ORACLE_SID; $ORACLE_HOME/bin/lsnrctl status\" | grep -iE 'XEPDB1|HOST=|PORT=' || true",
     ]
