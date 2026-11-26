@@ -205,21 +205,33 @@ resource "terraform_data" "vault_init" {
   provisioner "local-exec" {
     command = <<-EOT
       echo "Waiting for Vault to be ready..."
-      until docker exec vault-test vault status 2>&1 | grep -q "Seal Type"; do
+      for i in $(seq 1 100); do
+        docker exec vault-test vault status 2>&1 | grep -q "Seal Type" && break
+        [ "$i" -eq 100 ] && { echo "ERROR: Vault did not respond within 5 minutes."; exit 1; }
         echo "  Vault not ready yet, retrying in 3s..."
         sleep 3
       done
 
-      echo "Initializing Vault..."
-      docker exec vault-test sh -c \
-        'vault operator init -key-shares=1 -key-threshold=1 -format=json > /opt/vault/data/init.json'
+      if docker exec vault-test vault status -format=json 2>/dev/null | jq -e '.initialized' >/dev/null; then
+        echo "Vault is already initialized, reusing data/init.json."
+        docker exec vault-test test -s /opt/vault/data/init.json || {
+          echo "ERROR: Vault is initialized but /opt/vault/data/init.json is missing."; exit 1; }
+      else
+        echo "Initializing Vault..."
+        docker exec vault-test sh -c \
+          'vault operator init -key-shares=1 -key-threshold=1 -format=json > /opt/vault/data/init.json'
+      fi
 
       echo "Extracting unseal key and root token..."
       UNSEAL=$(docker exec vault-test cat /opt/vault/data/init.json | jq -r '.unseal_keys_b64[0]' | tr -d '[:space:]')
       TOKEN=$(docker exec vault-test cat /opt/vault/data/init.json | jq -r '.root_token' | tr -d '[:space:]')
 
-      echo "Unsealing Vault..."
-      docker exec vault-test vault operator unseal "$UNSEAL"
+      if docker exec vault-test vault status -format=json 2>/dev/null | jq -e '.sealed' >/dev/null; then
+        echo "Unsealing Vault..."
+        docker exec vault-test vault operator unseal "$UNSEAL"
+      else
+        echo "Vault is already unsealed."
+      fi
 
       echo "Writing root token and unseal key for Terraform..."
       printf '%s' "$TOKEN" > ${path.module}/.vault-token
@@ -241,7 +253,9 @@ resource "terraform_data" "oracle_users" {
     command = <<-EOT
       echo "Waiting for Oracle to be fully ready..."
       echo "This may take 2-5 minutes for the first startup..."
-      until docker logs oracle-xe-test 2>&1 | grep -q "DATABASE IS READY TO USE"; do
+      for i in $(seq 1 60); do
+        docker logs oracle-xe-test 2>&1 | grep -q "DATABASE IS READY TO USE" && break
+        [ "$i" -eq 60 ] && { echo "ERROR: Oracle was not ready within 15 minutes."; exit 1; }
         echo "  Oracle not fully ready yet, retrying in 15s..."
         sleep 15
       done
@@ -287,7 +301,9 @@ resource "terraform_data" "vault_plugin_register" {
       UNSEAL_KEY=$(cat ${path.module}/.vault-unseal-key | tr -d '[:space:]')
 
       # Wait for Vault container to be responsive
-      until docker exec vault-test vault status 2>&1 | grep -q "Seal Type"; do
+      for i in $(seq 1 100); do
+        docker exec vault-test vault status 2>&1 | grep -q "Seal Type" && break
+        [ "$i" -eq 100 ] && { echo "ERROR: Vault did not respond within 5 minutes."; exit 1; }
         echo "  Vault not ready yet, retrying in 3s..."
         sleep 3
       done
