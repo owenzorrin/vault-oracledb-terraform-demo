@@ -325,15 +325,20 @@ resource "terraform_data" "upload_scripts" {
     private_key = file(var.ssh_private_key_path)
   }
 
-  # Rendered with the tfvars passwords; removed from /tmp after the users exist.
+  # Rendered with the tfvars passwords. The file provisioner uploads as 0644, so
+  # use a private directory; create_users.sql is removed after the users exist.
+  provisioner "remote-exec" {
+    inline = ["install -d -m 700 /home/ec2-user/.vault-demo-sql"]
+  }
+
   provisioner "file" {
     content     = local.create_users_sql
-    destination = "/tmp/create_users.sql"
+    destination = "/home/ec2-user/.vault-demo-sql/create_users.sql"
   }
 
   provisioner "file" {
     content     = local.verify_users_sql
-    destination = "/tmp/verify_users.sql"
+    destination = "/home/ec2-user/.vault-demo-sql/verify_users.sql"
   }
 }
 
@@ -367,10 +372,11 @@ resource "terraform_data" "oracle_users" {
       "echo 'Creating Oracle users...'",
       # OS authentication (/ as sysdba) as the oracle user: no SYS password on the
       # command line, so this provisioner's output is not suppressed as sensitive.
+      "SQL_DIR=/home/ec2-user/.vault-demo-sql",
       "SQLPLUS=\"sudo -u oracle ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$ORACLE_SID $ORACLE_HOME/bin/sqlplus -s / as sysdba\"",
-      "OK=0; for i in 1 2 3 4 5; do $SQLPLUS < /tmp/create_users.sql; if $SQLPLUS < /tmp/verify_users.sql | grep -q 'USER_OK:'; then echo 'Oracle users created successfully.'; OK=1; break; fi; echo \"Attempt $i failed, retrying in 15s...\"; sleep 15; done",
+      "OK=0; for i in 1 2 3 4 5; do if $SQLPLUS < $SQL_DIR/create_users.sql && $SQLPLUS < $SQL_DIR/verify_users.sql | grep -q 'USER_OK:'; then echo 'Oracle users created successfully.'; OK=1; break; fi; echo \"Attempt $i failed, retrying in 15s...\"; sleep 15; done",
       "[ $OK -eq 1 ] || { echo 'ERROR: Oracle users were not created'; exit 1; }",
-      "rm -f /tmp/create_users.sql",
+      "rm -f $SQL_DIR/create_users.sql",
     ]
   }
 }

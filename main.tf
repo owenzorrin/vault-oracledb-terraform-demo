@@ -43,6 +43,11 @@ variable "vault_db_password" {
   type        = string
   default     = "vaultpasswd"
   sensitive   = true
+
+  validation {
+    condition     = length(regexall("\"", var.vault_db_password)) == 0
+    error_message = "vault_db_password must not contain a double quote (\")."
+  }
 }
 
 # =============================================================================
@@ -280,9 +285,8 @@ resource "terraform_data" "oracle_users" {
       # SYS password is needed here.
       echo "Creating Oracle users (with retries)..."
       for i in 1 2 3 4 5; do
-        docker exec -i oracle-xe-test sqlplus -s / as sysdba < ${local_sensitive_file.create_users_sql.filename}
-
-        if docker exec -i oracle-xe-test sqlplus -s / as sysdba < ${local_file.verify_users_sql.filename} | grep -q "USER_OK:"; then
+        if docker exec -i oracle-xe-test sqlplus -s / as sysdba < ${local_sensitive_file.create_users_sql.filename} &&
+          docker exec -i oracle-xe-test sqlplus -s / as sysdba < ${local_file.verify_users_sql.filename} | grep -q "USER_OK:"; then
           echo "Oracle users created successfully on attempt $i."
           exit 0
         fi
