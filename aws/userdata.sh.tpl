@@ -51,6 +51,11 @@ if [ -n "$DATA_DEV" ]; then
   mountpoint -q /opt/vault/data || mount /opt/vault/data
   chown vault:vault /opt/vault/data
   chmod 700 /opt/vault/data
+  # nofail keeps boot going if the volume is missing; make Vault wait for the
+  # mount rather than start on the empty root-volume directory.
+  mkdir -p /etc/systemd/system/vault.service.d
+  printf '[Unit]\nRequiresMountsFor=/opt/vault/data\n' > /etc/systemd/system/vault.service.d/data-mount.conf
+  systemctl daemon-reload
   echo "==> $DATA_DEV mounted at /opt/vault/data."
 else
   echo "WARNING: Vault data volume not found; Raft data stays on the root volume."
