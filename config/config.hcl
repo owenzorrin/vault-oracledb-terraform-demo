@@ -9,8 +9,8 @@ storage "raft" {
     node_id = "vault-1"
 }
 
-api_addr = "http://v0:8200"
-cluster_addr = "http://v0:8201"
+api_addr = "http://vault-test:8200"
+cluster_addr = "http://vault-test:8201"
 cluster_name = "vault-cluster"
 ui = true
 log_level = "trace"
