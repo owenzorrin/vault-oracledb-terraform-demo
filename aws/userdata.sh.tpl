@@ -9,6 +9,7 @@
 #   3. Write the Vault config to /etc/vault.d/vault.hcl
 #   4. Write the Vault Enterprise license to /etc/vault.d/vault.license
 #   5. Enable and start the vault systemd service
+#   (first) Format + mount the EBS data volume at /opt/vault/data
 #
 # Vault config is rendered by Terraform's templatefile() with the Elastic IP.
 # The Oracle Instant Client and Vault Oracle plugin are uploaded by Terraform
@@ -18,6 +19,47 @@ set -uo pipefail
 # Note: -e (exit on error) intentionally omitted — Oracle DBCA and Vault start
 # failures are handled by Terraform remote-exec provisioners, not by aborting
 # user-data entirely. A hard exit here would leave the instance unbootable.
+
+# =============================================================================
+# Vault data volume - format on first use, mount at /opt/vault/data
+# =============================================================================
+# The EBS volume attached as /dev/sdf holds Raft storage + init.json. On Nitro
+# instances it appears as an NVMe device; AL2023's udev rules add the /dev/sdf
+# symlink. Fall back to the only other disk if the symlink is missing.
+echo "==> Mounting Vault data volume..."
+DATA_DEV=""
+for _ in $(seq 1 60); do
+  for d in /dev/sdf /dev/xvdf; do
+    if [ -b "$d" ]; then DATA_DEV=$(readlink -f "$d"); break 2; fi
+  done
+  sleep 2
+done
+if [ -z "$DATA_DEV" ]; then
+  ROOT_DISK=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)")
+  DATA_DEV=$(lsblk -dpno NAME,TYPE | awk -v root="/dev/$ROOT_DISK" '$2 == "disk" && $1 != root { print $1; exit }')
+fi
+
+if [ -n "$DATA_DEV" ]; then
+  if ! blkid "$DATA_DEV" >/dev/null 2>&1; then
+    echo "==> Formatting $DATA_DEV (first use)..."
+    mkfs.xfs -L vault-data "$DATA_DEV"
+  fi
+  DATA_UUID=$(blkid -s UUID -o value "$DATA_DEV")
+  mkdir -p /opt/vault/data
+  grep -q "UUID=$DATA_UUID" /etc/fstab || \
+    echo "UUID=$DATA_UUID /opt/vault/data xfs defaults,nofail 0 2" >> /etc/fstab
+  mountpoint -q /opt/vault/data || mount /opt/vault/data
+  chown vault:vault /opt/vault/data
+  chmod 700 /opt/vault/data
+  # nofail keeps boot going if the volume is missing; make Vault wait for the
+  # mount rather than start on the empty root-volume directory.
+  mkdir -p /etc/systemd/system/vault.service.d
+  printf '[Unit]\nRequiresMountsFor=/opt/vault/data\n' > /etc/systemd/system/vault.service.d/data-mount.conf
+  systemctl daemon-reload
+  echo "==> $DATA_DEV mounted at /opt/vault/data."
+else
+  echo "WARNING: Vault data volume not found; Raft data stays on the root volume."
+fi
 
 # =============================================================================
 # Oracle XE - configure + start
