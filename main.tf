@@ -345,12 +345,12 @@ resource "vault_generic_endpoint" "oracle_connection" {
   ignore_absent_fields = true
 
   data_json = jsonencode({
-    plugin_name              = "vault-plugin-database-oracle"
-    connection_url           = "{{username}}/{{password}}@oracle-xe-test:1521/XEPDB1"
-    username                 = var.vault_db_username
-    password                 = var.vault_db_password
-    allowed_roles            = ["my-role", "static-role"]
-    max_connection_lifetime  = "60s"
+    plugin_name             = "vault-plugin-database-oracle"
+    connection_url          = "{{username}}/{{password}}@oracle-xe-test:1521/XEPDB1"
+    username                = var.vault_db_username
+    password                = var.vault_db_password
+    allowed_roles           = ["my-role", "static-role"]
+    max_connection_lifetime = "60s"
   })
 }
 
