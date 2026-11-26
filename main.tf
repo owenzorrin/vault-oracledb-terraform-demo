@@ -245,6 +245,12 @@ resource "terraform_data" "vault_init" {
 
 # Rendered with the tfvars passwords. Written to a gitignored file instead of
 # being inlined so the provisioner output below is not suppressed as sensitive.
+# Keeps the rendered SQL out of Git even without the root .gitignore.
+resource "local_file" "generated_gitignore" {
+  filename = "${path.module}/.generated/.gitignore"
+  content  = "*\n"
+}
+
 resource "local_sensitive_file" "create_users_sql" {
   filename        = "${path.module}/.generated/create_users.sql"
   file_permission = "0600"
