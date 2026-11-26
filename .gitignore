@@ -1,0 +1,21 @@
+.DS_Store
+
+# Terraform state and credentials
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+terraform.tfvars
+.vault-token
+.vault-unseal-key
+
+# Rendered SQL (contains the Vault DB password)
+.generated/
+
+# Downloaded artifacts and Vault data (init.json holds the root token)
+client/*
+!client/.gitkeep
+plugin/*
+!plugin/.gitkeep
+data/*
+!data/.gitkeep

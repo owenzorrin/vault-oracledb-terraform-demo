@@ -240,5 +240,5 @@ aws ec2 delete-snapshot --snapshot-id "$SNAP"
 - **Vault config + license**: Both are written by user-data from Terraform template variables — no separate upload step needed. `api_addr` is set to the Elastic IP so it's correct before Vault ever starts.
 - **Vault plugin layout**: Same subfolder requirement as the local demo — the binary must live in `plugin/vault-plugin-database-oracle_0.13.0+ent_linux_amd64/vault-plugin-database-oracle`.
 - **EIP stability**: Elastic IP keeps `api_addr` stable across EC2 stop/start cycles.
-- **EBS data volume**: holds Raft storage, `init.json` and credentials. It is created with `delete_on_termination = false`, so it outlives the instance (see the teardown note).
+- **EBS data volume**: formatted (XFS, first boot only) and mounted at `/opt/vault/data` by user-data; holds Raft storage, `init.json` and credentials. It is created with `delete_on_termination = false`, so it outlives the instance (see the teardown note).
 - **Bumping Vault version**: Update `VAULT_VERSION` in [`packer/scripts/install_oracle.sh`](packer/scripts/install_oracle.sh), bump the plugin version in the `terraform_data.vault_plugin` download URL and `-version` flag in `terraform_data.vault_plugin_register`, then rebuild the AMI with Packer.

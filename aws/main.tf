@@ -13,6 +13,16 @@ terraform {
   }
 }
 
+locals {
+  create_users_sql = templatefile("${path.module}/scripts/create_users.sql.tpl", {
+    vault_db_username = var.vault_db_username
+    vault_db_password = var.vault_db_password
+  })
+  verify_users_sql = templatefile("${path.module}/scripts/verify_users.sql.tpl", {
+    vault_db_username = var.vault_db_username
+  })
+}
+
 # =============================================================================
 # Providers
 # =============================================================================
@@ -232,7 +242,7 @@ resource "terraform_data" "bootstrap" {
   provisioner "remote-exec" {
     inline = [
       "echo 'Waiting for cloud-init / user-data to complete...'",
-      "until [ -f /var/lib/cloud/instance/boot-finished ]; do sleep 5; done",
+      "for i in $(seq 1 480); do [ -f /var/lib/cloud/instance/boot-finished ] && break; [ $i -eq 480 ] && { echo 'ERROR: cloud-init did not finish within 40 minutes; see /var/log/cloud-init-output.log'; exit 1; }; sleep 5; done",
       "echo 'cloud-init finished.'",
       # Allow ec2-user to write into the Vault artifact directories
       "sudo chown -R ec2-user:ec2-user /vault/plugin /vault/client",
@@ -304,6 +314,8 @@ resource "terraform_data" "upload_vault_plugin" {
 
 # Upload SQL scripts
 resource "terraform_data" "upload_scripts" {
+  triggers_replace = [sha256(local.create_users_sql), sha256(local.verify_users_sql)]
+
   depends_on = [terraform_data.bootstrap]
 
   connection {
@@ -313,14 +325,23 @@ resource "terraform_data" "upload_scripts" {
     private_key = file(var.ssh_private_key_path)
   }
 
+  # Rendered with the tfvars passwords; removed from /tmp after the users exist.
   provisioner "file" {
-    source      = "${path.module}/scripts/"
-    destination = "/tmp/"
+    content     = local.create_users_sql
+    destination = "/tmp/create_users.sql"
+  }
+
+  provisioner "file" {
+    content     = local.verify_users_sql
+    destination = "/tmp/verify_users.sql"
   }
 }
 
 # Oracle user setup — mirrors terraform_data.oracle_users from original
 resource "terraform_data" "oracle_users" {
+  # Re-create the users when the rendered SQL (e.g. vault_db_password) changes.
+  triggers_replace = [terraform_data.upload_scripts.id]
+
   depends_on = [
     terraform_data.upload_scripts,
     aws_eip_association.vault,
@@ -336,15 +357,20 @@ resource "terraform_data" "oracle_users" {
   provisioner "remote-exec" {
     inline = [
       "echo 'Waiting for Oracle XE to be active...'",
-      "until sudo systemctl is-active oracle-xe-21c >/dev/null 2>&1; do echo '  Oracle not active yet, retrying in 10s...'; sleep 10; done",
+      "for i in $(seq 1 90); do sudo systemctl is-active oracle-xe-21c >/dev/null 2>&1 && break; [ $i -eq 90 ] && { echo 'ERROR: oracle-xe-21c was not active within 15 minutes'; exit 1; }; echo '  Oracle not active yet, retrying in 10s...'; sleep 10; done",
       "echo 'Waiting for XEPDB1 to become available...'",
       "ORACLE_HOME=$(sudo cat /etc/oratab | grep '^XE' | cut -d: -f2)",
       # ORACLE_SID must be set for bequeath (local) sqlplus connections;
       # without it every attempt fails with ORA-12162.
       "export ORACLE_SID=XE",
-      "for i in $(seq 1 20); do echo 'SELECT 1 FROM DUAL;' | sudo -u oracle ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$ORACLE_SID $ORACLE_HOME/bin/sqlplus -s / as sysdba 2>&1 | grep -qE '^[[:space:]]*1$' && break || { echo \"  Attempt $i: DB not ready, retrying in 15s...\"; sleep 15; }; done",
+      "for i in $(seq 1 20); do echo 'SELECT 1 FROM DUAL;' | sudo -u oracle ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$ORACLE_SID $ORACLE_HOME/bin/sqlplus -s / as sysdba 2>&1 | grep -qE '^[[:space:]]*1$' && break; [ $i -eq 20 ] && { echo 'ERROR: database did not answer within 5 minutes'; exit 1; }; echo \"  Attempt $i: DB not ready, retrying in 15s...\"; sleep 15; done",
       "echo 'Creating Oracle users...'",
-      "OK=0; for i in 1 2 3 4 5; do sudo -u oracle bash -c \"export ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$ORACLE_SID; $ORACLE_HOME/bin/sqlplus sys/${var.oracle_password} as sysdba @/tmp/create_users.sql\" ; RESULT=$(sudo -u oracle bash -c \"export ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$ORACLE_SID; $ORACLE_HOME/bin/sqlplus -s sys/${var.oracle_password} as sysdba @/tmp/verify_users.sql\"); if echo \"$RESULT\" | grep -q 'VAULT'; then echo 'Oracle users created successfully.'; OK=1; break; fi; echo \"Attempt $i failed, retrying in 15s...\"; sleep 15; done; [ $OK -eq 1 ] || { echo 'ERROR: Oracle users were not created'; exit 1; }",
+      # OS authentication (/ as sysdba) as the oracle user: no SYS password on the
+      # command line, so this provisioner's output is not suppressed as sensitive.
+      "SQLPLUS=\"sudo -u oracle ORACLE_HOME=$ORACLE_HOME ORACLE_SID=$ORACLE_SID $ORACLE_HOME/bin/sqlplus -s / as sysdba\"",
+      "OK=0; for i in 1 2 3 4 5; do $SQLPLUS < /tmp/create_users.sql; if $SQLPLUS < /tmp/verify_users.sql | grep -q 'USER_OK:'; then echo 'Oracle users created successfully.'; OK=1; break; fi; echo \"Attempt $i failed, retrying in 15s...\"; sleep 15; done",
+      "[ $OK -eq 1 ] || { echo 'ERROR: Oracle users were not created'; exit 1; }",
+      "rm -f /tmp/create_users.sql",
     ]
   }
 }
@@ -376,17 +402,15 @@ resource "terraform_data" "vault_init" {
       "if ! sudo systemctl is-active vault >/dev/null 2>&1; then echo 'Vault not running, attempting restart...'; sudo systemctl restart vault; sleep 3; fi",
 
       "echo 'Waiting for Vault to be ready...'",
-      "until VAULT_ADDR=http://127.0.0.1:8200 vault status 2>&1 | grep -q 'Seal Type'; do echo '  Vault not ready yet, retrying in 3s...'; sleep 3; done",
+      "for i in $(seq 1 100); do VAULT_ADDR=http://127.0.0.1:8200 vault status 2>&1 | grep -q 'Seal Type' && break; [ $i -eq 100 ] && { echo 'ERROR: Vault did not respond within 5 minutes'; exit 1; }; echo '  Vault not ready yet, retrying in 3s...'; sleep 3; done",
 
-      "echo 'Initializing Vault...'",
-      "VAULT_ADDR=http://127.0.0.1:8200 vault operator init -key-shares=1 -key-threshold=1 -format=json | sudo tee /opt/vault/data/init.json > /dev/null",
+      "if VAULT_ADDR=http://127.0.0.1:8200 vault status -format=json 2>/dev/null | jq -e '.initialized' >/dev/null; then echo 'Vault is already initialized, reusing /opt/vault/data/init.json.'; sudo test -s /opt/vault/data/init.json || { echo 'ERROR: Vault is initialized but /opt/vault/data/init.json is missing'; exit 1; }; else echo 'Initializing Vault...'; VAULT_ADDR=http://127.0.0.1:8200 vault operator init -key-shares=1 -key-threshold=1 -format=json | sudo tee /opt/vault/data/init.json > /dev/null; fi",
 
       "echo 'Extracting unseal key and root token...'",
       "UNSEAL=$(sudo cat /opt/vault/data/init.json | jq -r '.unseal_keys_b64[0]' | tr -d '[:space:]')",
       "TOKEN=$(sudo cat /opt/vault/data/init.json | jq -r '.root_token' | tr -d '[:space:]')",
 
-      "echo 'Unsealing Vault...'",
-      "VAULT_ADDR=http://127.0.0.1:8200 vault operator unseal \"$UNSEAL\"",
+      "if VAULT_ADDR=http://127.0.0.1:8200 vault status -format=json 2>/dev/null | jq -e '.sealed' >/dev/null; then echo 'Unsealing Vault...'; VAULT_ADDR=http://127.0.0.1:8200 vault operator unseal \"$UNSEAL\"; else echo 'Vault is already unsealed.'; fi",
 
       "echo 'Persisting credentials to EBS data volume...'",
       "printf '%s' \"$TOKEN\" | sudo tee /opt/vault/data/.vault-token > /dev/null",
@@ -431,7 +455,7 @@ resource "terraform_data" "vault_plugin_register" {
     inline = [
       "echo 'Ensuring Vault is unsealed...'",
       "UNSEAL_KEY=$(sudo cat /opt/vault/data/.vault-unseal-key | tr -d '[:space:]')",
-      "until VAULT_ADDR=http://127.0.0.1:8200 vault status 2>&1 | grep -q 'Seal Type'; do echo '  Vault not ready, retrying in 3s...'; sleep 3; done",
+      "for i in $(seq 1 100); do VAULT_ADDR=http://127.0.0.1:8200 vault status 2>&1 | grep -q 'Seal Type' && break; [ $i -eq 100 ] && { echo 'ERROR: Vault did not respond within 5 minutes'; exit 1; }; echo '  Vault not ready, retrying in 3s...'; sleep 3; done",
       "if VAULT_ADDR=http://127.0.0.1:8200 vault status 2>&1 | grep -q 'Sealed.*true'; then echo 'Vault is sealed, unsealing...'; VAULT_ADDR=http://127.0.0.1:8200 vault operator unseal \"$UNSEAL_KEY\"; else echo 'Vault is already unsealed.'; fi",
 
       "echo 'Registering Oracle database plugin...'",

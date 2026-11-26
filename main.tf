@@ -8,6 +8,10 @@ terraform {
       source  = "hashicorp/vault"
       version = "~> 4.0"
     }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.4"
+    }
   }
 }
 
@@ -205,21 +209,33 @@ resource "terraform_data" "vault_init" {
   provisioner "local-exec" {
     command = <<-EOT
       echo "Waiting for Vault to be ready..."
-      until docker exec vault-test vault status 2>&1 | grep -q "Seal Type"; do
+      for i in $(seq 1 100); do
+        docker exec vault-test vault status 2>&1 | grep -q "Seal Type" && break
+        [ "$i" -eq 100 ] && { echo "ERROR: Vault did not respond within 5 minutes."; exit 1; }
         echo "  Vault not ready yet, retrying in 3s..."
         sleep 3
       done
 
-      echo "Initializing Vault..."
-      docker exec vault-test sh -c \
-        'vault operator init -key-shares=1 -key-threshold=1 -format=json > /opt/vault/data/init.json'
+      if docker exec vault-test vault status -format=json 2>/dev/null | jq -e '.initialized' >/dev/null; then
+        echo "Vault is already initialized, reusing data/init.json."
+        docker exec vault-test test -s /opt/vault/data/init.json || {
+          echo "ERROR: Vault is initialized but /opt/vault/data/init.json is missing."; exit 1; }
+      else
+        echo "Initializing Vault..."
+        docker exec vault-test sh -c \
+          'vault operator init -key-shares=1 -key-threshold=1 -format=json > /opt/vault/data/init.json'
+      fi
 
       echo "Extracting unseal key and root token..."
       UNSEAL=$(docker exec vault-test cat /opt/vault/data/init.json | jq -r '.unseal_keys_b64[0]' | tr -d '[:space:]')
       TOKEN=$(docker exec vault-test cat /opt/vault/data/init.json | jq -r '.root_token' | tr -d '[:space:]')
 
-      echo "Unsealing Vault..."
-      docker exec vault-test vault operator unseal "$UNSEAL"
+      if docker exec vault-test vault status -format=json 2>/dev/null | jq -e '.sealed' >/dev/null; then
+        echo "Unsealing Vault..."
+        docker exec vault-test vault operator unseal "$UNSEAL"
+      else
+        echo "Vault is already unsealed."
+      fi
 
       echo "Writing root token and unseal key for Terraform..."
       printf '%s' "$TOKEN" > ${path.module}/.vault-token
@@ -234,29 +250,53 @@ resource "terraform_data" "vault_init" {
 # Stage 1: Oracle User Setup
 # =============================================================================
 
+# Rendered with the tfvars passwords. Written to a gitignored file instead of
+# being inlined so the provisioner output below is not suppressed as sensitive.
+resource "local_sensitive_file" "create_users_sql" {
+  filename        = "${path.module}/.generated/create_users.sql"
+  file_permission = "0600"
+  content = templatefile("${path.module}/scripts/create_users.sql.tpl", {
+    vault_db_username = var.vault_db_username
+    vault_db_password = var.vault_db_password
+  })
+}
+
+resource "local_file" "verify_users_sql" {
+  filename        = "${path.module}/.generated/verify_users.sql"
+  file_permission = "0600"
+  content = templatefile("${path.module}/scripts/verify_users.sql.tpl", {
+    vault_db_username = var.vault_db_username
+  })
+}
+
 resource "terraform_data" "oracle_users" {
   depends_on = [docker_container.oracle]
+
+  # Re-create the users when the rendered SQL (e.g. vault_db_password) changes.
+  triggers_replace = [
+    local_sensitive_file.create_users_sql.content_sha256,
+    local_file.verify_users_sql.content_sha256,
+  ]
 
   provisioner "local-exec" {
     command = <<-EOT
       echo "Waiting for Oracle to be fully ready..."
       echo "This may take 2-5 minutes for the first startup..."
-      until docker logs oracle-xe-test 2>&1 | grep -q "DATABASE IS READY TO USE"; do
+      for i in $(seq 1 60); do
+        docker logs oracle-xe-test 2>&1 | grep -q "DATABASE IS READY TO USE" && break
+        [ "$i" -eq 60 ] && { echo "ERROR: Oracle was not ready within 15 minutes."; exit 1; }
         echo "  Oracle not fully ready yet, retrying in 15s..."
         sleep 15
       done
       echo "Oracle is ready."
 
-      echo "Copying SQL scripts into container..."
-      docker cp ${path.module}/scripts/create_users.sql oracle-xe-test:/tmp/create_users.sql
-      docker cp ${path.module}/scripts/verify_users.sql oracle-xe-test:/tmp/verify_users.sql
-
+      # OS authentication (/ as sysdba) as the container's oracle user, so no
+      # SYS password is needed here.
       echo "Creating Oracle users (with retries)..."
       for i in 1 2 3 4 5; do
-        docker exec oracle-xe-test bash -c "sqlplus sys/rootpassword as sysdba @/tmp/create_users.sql"
+        docker exec -i oracle-xe-test sqlplus -s / as sysdba < ${local_sensitive_file.create_users_sql.filename}
 
-        RESULT=$(docker exec oracle-xe-test bash -c "sqlplus -s sys/rootpassword as sysdba @/tmp/verify_users.sql")
-        if echo "$RESULT" | grep -q "VAULT"; then
+        if docker exec -i oracle-xe-test sqlplus -s / as sysdba < ${local_file.verify_users_sql.filename} | grep -q "USER_OK:"; then
           echo "Oracle users created successfully on attempt $i."
           exit 0
         fi
@@ -287,7 +327,9 @@ resource "terraform_data" "vault_plugin_register" {
       UNSEAL_KEY=$(cat ${path.module}/.vault-unseal-key | tr -d '[:space:]')
 
       # Wait for Vault container to be responsive
-      until docker exec vault-test vault status 2>&1 | grep -q "Seal Type"; do
+      for i in $(seq 1 100); do
+        docker exec vault-test vault status 2>&1 | grep -q "Seal Type" && break
+        [ "$i" -eq 100 ] && { echo "ERROR: Vault did not respond within 5 minutes."; exit 1; }
         echo "  Vault not ready yet, retrying in 3s..."
         sleep 3
       done
@@ -345,12 +387,12 @@ resource "vault_generic_endpoint" "oracle_connection" {
   ignore_absent_fields = true
 
   data_json = jsonencode({
-    plugin_name              = "vault-plugin-database-oracle"
-    connection_url           = "{{username}}/{{password}}@oracle-xe-test:1521/XEPDB1"
-    username                 = var.vault_db_username
-    password                 = var.vault_db_password
-    allowed_roles            = ["my-role", "static-role"]
-    max_connection_lifetime  = "60s"
+    plugin_name             = "vault-plugin-database-oracle"
+    connection_url          = "{{username}}/{{password}}@oracle-xe-test:1521/XEPDB1"
+    username                = var.vault_db_username
+    password                = var.vault_db_password
+    allowed_roles           = ["my-role", "static-role"]
+    max_connection_lifetime = "60s"
   })
 }
 

@@ -119,6 +119,7 @@ colima stop
 
 ## Notes
 
+- **Passwords**: `vault_db_username` / `vault_db_password` are rendered into `scripts/create_users.sql.tpl` (written to the gitignored `.generated/`) and used in Vault's connection config, so changing them in `terraform.tfvars` re-runs user creation. Oracle users are created with OS authentication (`/ as sysdba`), so the SYS password is only used to start the container.
 - **Two-stage apply**: Required because Vault must be initialized and unsealed before the Terraform Vault provider can configure it.
 - **Oracle startup**: Oracle XE can take a few minutes to fully initialize. The provisioner includes a retry loop.
 - **Binary downloads**: The Oracle Instant Client and Vault Oracle plugin are downloaded automatically on the first run and cached in `client/` and `plugin/`.
